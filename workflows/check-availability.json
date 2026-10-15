@@ -1,0 +1,219 @@
+{
+  "name": "Clinic Voice — Check Availability",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "clinic/check-availability",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "d4ca15dd-6e4c-4a93-9eeb-559ef9d7e47f",
+      "name": "Webhook"
+    },
+    {
+      "parameters": {
+        "jsCode": "// First Code node after Webhook; rename it \"Validate Availability Request\".\n// Run Once for All Items. Accept one JSON request per webhook call.\nconst incoming = $input.first().json;\nlet body = incoming.body ?? incoming;\nif (typeof body === 'string') {\n  try { body = JSON.parse(body); }\n  catch { body = null; }\n}\n\nfunction validDate(value) {\n  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(value)) return false;\n  const date = new Date(value + 'T00:00:00Z');\n  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;\n}\n\nconst service = typeof body?.service === 'string' ? body.service.trim() : '';\nconst date = typeof body?.date === 'string' ? body.date.trim() : '';\nlet errorCode = '';\nlet message = '';\nif (service !== 'general_consultation') {\n  errorCode = 'unsupported_service';\n  message = 'This demo checks general consultation appointments only.';\n} else if (!validDate(date)) {\n  errorCode = 'invalid_date';\n  message = 'date must be a real calendar date in YYYY-MM-DD format.';\n}\n\nreturn [{json:{\n  valid: !errorCode,\n  service,\n  date,\n  ...(errorCode ? {status:'invalid_request', error_code:errorCode, message} : {})\n}}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        0
+      ],
+      "id": "7830ee82-202f-4002-97de-af20c73af271",
+      "name": "Validate Availability Request"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "d1d9d073-b332-4194-8149-9063a9415f73",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        448,
+        0
+      ],
+      "id": "2814d923-2dc5-4032-a85f-8b1923cef65c",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "",
+          "mode": "list",
+          "cachedResultName": "clinic_slots"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "service",
+              "keyValue": "={{ $('Validate Availability Request').first().json.service }}"
+            },
+            {
+              "keyName": "local_date",
+              "keyValue": "={{ $('Validate Availability Request').first().json.date }}"
+            },
+            {
+              "keyName": "status",
+              "keyValue": "available"
+            }
+          ]
+        },
+        "returnAll": true
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        672,
+        -96
+      ],
+      "id": "40ff637e-4623-4bb4-91bc-2b6d1b005222",
+      "name": "Get row(s)",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Code node after Data Table Get; rename it \"Build Availability Response\".\n// The prior validation node must be named \"Validate Availability Request\".\n// Run Once for All Items. Data Table Get needs Always Output Data enabled.\nconst request = $('Validate Availability Request').first().json;\nconst now = Date.now();\nconst slots = $input.all().map(item => item.json)\n  .filter(row => row && row.service === request.service &&\n    row.local_date === request.date && row.status === 'available' &&\n    typeof row.slot_id === 'string' && typeof row.starts_at === 'string' &&\n    Number.isFinite(Date.parse(row.starts_at)) && Date.parse(row.starts_at) > now)\n  .sort((a, b) => Date.parse(a.starts_at) - Date.parse(b.starts_at))\n  .map(row => ({slot_id:row.slot_id, starts_at:row.starts_at}));\n\nreturn [{json:{\n  status:'ok',\n  service:request.service,\n  date:request.date,\n  timezone:'Asia/Riyadh',\n  slots\n}}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        896,
+        -96
+      ],
+      "id": "d55cb47f-5ca4-4941-98ca-91971eee92b0",
+      "name": "Build Availability Response"
+    },
+    {
+      "parameters": {
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1120,
+        -96
+      ],
+      "id": "b4d4efec-8334-44c4-ae83-0ace1b615e5c",
+      "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        672,
+        80
+      ],
+      "id": "7ae7fcc3-ddfc-4bd8-9cda-f258a5dffea3",
+      "name": "Respond to Webhook1"
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate Availability Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Availability Request": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Get row(s)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond to Webhook1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get row(s)": {
+      "main": [
+        [
+          {
+            "node": "Build Availability Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Availability Response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  }
+}

@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Demo Clinic voice connection test</title>
+<h1>Demo Clinic voice connection test</h1>
+<p>Use synthetic details only. Availability and booking are connected; callback is not.</p>
+<button id="start">Start microphone</button>
+<button id="stop" disabled>End call</button>
+<p id="status" role="status">Ready</p>
+<p>Ask for general-consultation slots on 20 October 2026. To test booking, provide a fictional name and number, listen to the repeated details, then clearly confirm.</p>
+<h2>Turn transcript</h2>
+<p>This is a rough transcription for testing. Check it against what you actually heard.</p>
+<pre id="turns" aria-live="polite">No turns yet.</pre>
+<h2>Tool results</h2>
+<pre id="tool-results" aria-live="polite">No tool calls yet.</pre>
+<script>
+const start = document.getElementById('start');
+const stop = document.getElementById('stop');
+const status = document.getElementById('status');
+const turnsView = document.getElementById('turns');
+const toolResultsView = document.getElementById('tool-results');
+let peer;
+let microphone;
+let speaker;
+let turns = [];
+let turnByItemId = new Map();
+let offeredSlots = new Set();
+let toolResults = [];
+
+function showToolResult(name, result) {
+  toolResults.push({tool:name, status:result.status,
+    error_code:result.error_code ?? null,
+    booking_reference:result.booking_reference ?? null,
+    slot_id:result.slot_id ?? null,
+    slot_count:Array.isArray(result.slots) ? result.slots.length : null});
+  toolResultsView.textContent = JSON.stringify(toolResults, null, 2);
+}
+
+function renderTurns() {
+  turnsView.textContent = turns.length
+    ? turns.map(turn => `${turn.id} ${turn.role.toUpperCase()}: ${turn.text || '[transcribing…]'}`).join('\n')
+    : 'No turns yet.';
+}
+
+function ensureTurn(itemId, role) {
+  if (!itemId) return null;
+  if (turnByItemId.has(itemId)) return turnByItemId.get(itemId);
+  const turn = {id:`T${turns.length + 1}`, role, text:'',
+    timestamp:new Date().toISOString(), item_id:itemId};
+  turns.push(turn);
+  turnByItemId.set(itemId, turn);
+  renderTurns();
+  return turn;
+}
+
+function updateTurn(itemId, role, text) {
+  const turn = ensureTurn(itemId, role);
+  if (!turn) return;
+  turn.text = text || '[transcription unavailable]';
+  renderTurns();
+}
+
+async function latestCustomerTurn() {
+  const turn = [...turns].reverse().find(item => item.role === 'customer');
+  if (!turn) return null;
+  for (let attempt = 0; attempt < 30 && !turn.text; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  return turn;
+}
+
+function clearlyConfirmed(text) {
+  return /^(?:yes\b|yeah\b|i confirm\b|please book\b|(?:نعم|اي|أيوه|موافق|أوافق|احجز)(?=$|[\s،,.!؟]))/iu.test(text.trim());
+}
+
+function endCall() {
+  microphone?.getTracks().forEach(track => track.stop());
+  peer?.close();
+  speaker?.remove();
+  microphone = null;
+  peer = null;
+  speaker = null;
+  start.disabled = false;
+  stop.disabled = true;
+  status.textContent = 'Call ended';
+}
+
+start.onclick = async () => {
+  start.disabled = true;
+  turns = [];
+  turnByItemId = new Map();
+  offeredSlots = new Set();
+  toolResults = [];
+  toolResultsView.textContent = 'No tool calls yet.';
+  renderTurns();
+  status.textContent = 'Requesting microphone access…';
+  try {
+    microphone = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const connection = new RTCPeerConnection();
+    peer = connection;
+    speaker = document.createElement('audio');
+    speaker.autoplay = true;
+    document.body.appendChild(speaker);
+    connection.ontrack = event => { speaker.srcObject = event.streams[0]; };
+    connection.onconnectionstatechange = () => {
+      status.textContent = `Connection: ${connection.connectionState}`;
+      if (connection.connectionState === 'failed') endCall();
+    };
+    connection.addTrack(microphone.getAudioTracks()[0], microphone);
+    const events = connection.createDataChannel('oai-events');
+    events.onopen = () => {
+      status.textContent = 'Connected. Enabling transcription…';
+      events.send(JSON.stringify({
+        type: 'session.update',
+        event_id: 'enable-input-transcription',
+        session: {
+          type: 'realtime',
+          audio: { input: { transcription: { model: 'gpt-4o-mini-transcribe' } } }
+        }
+      }));
+    };
+    events.onerror = () => { status.textContent = 'Audio event channel error'; };
+    const handledCalls = new Set();
+    events.onmessage = async message => {
+      if (peer !== connection) return;
+      let event;
+      try { event = JSON.parse(message.data); }
+      catch { return; }
+      if (event.type === 'session.updated') {
+        status.textContent = event.session?.audio?.input?.transcription
+          ? 'Connected. Transcription enabled. Speak now.'
+          : 'Connected. Transcription unavailable. Speak now.';
+      }
+      if (event.type === 'conversation.item.added' && event.item?.type === 'message') {
+        const role = event.item.role === 'user' ? 'customer'
+          : event.item.role === 'assistant' ? 'agent' : null;
+        if (role) ensureTurn(event.item.id, role);
+      }
+      if (event.type === 'conversation.item.input_audio_transcription.completed') {
+        updateTurn(event.item_id, 'customer', event.transcript);
+      }
+      if (event.type === 'conversation.item.input_audio_transcription.failed') {
+        updateTurn(event.item_id, 'customer', '[transcription unavailable]');
+      }
+      if (event.type === 'response.output_audio_transcript.done') {
+        updateTurn(event.item_id, 'agent', event.transcript);
+      }
+      if (event.type === 'response.output_text.done') {
+        updateTurn(event.item_id, 'agent', event.text);
+      }
+      if (event.type === 'error') {
+        status.textContent = `Voice error: ${event.error?.message ?? 'unknown error'}`;
+        return;
+      }
+      if (event.type !== 'response.done') return;
+      const calls = (event.response?.output ?? []).filter(item =>
+        item.type === 'function_call' &&
+        ['check_availability','create_booking'].includes(item.name) &&
+        item.call_id && !handledCalls.has(item.call_id));
+      if (!calls.length) return;
+      for (const call of calls) {
+        handledCalls.add(call.call_id);
+        let output;
+        try {
+          const args = JSON.parse(call.arguments);
+          if (call.name === 'check_availability') {
+            status.textContent = 'Checking n8n availability…';
+            const result = await fetch('/tool/check-availability', {
+              method:'POST', headers:{'Content-Type':'application/json'},
+              body:JSON.stringify(args)
+            });
+            output = await result.json();
+            offeredSlots = output.status === 'ok'
+              ? new Set(output.slots.map(slot => slot.slot_id)) : new Set();
+          } else {
+            status.textContent = 'Checking booking confirmation…';
+            const confirmation = await latestCustomerTurn();
+            if (!offeredSlots.has(args.slot_id)) {
+              output = {status:'error', error_code:'slot_not_offered'};
+            } else if (!confirmation?.text || !clearlyConfirmed(confirmation.text)) {
+              output = {status:'error', error_code:'clear_confirmation_needed'};
+            } else {
+              status.textContent = 'Saving booking in n8n…';
+              const result = await fetch('/tool/create-booking', {
+                method:'POST', headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({...args,
+                  confirmation_turn_id:confirmation.id,
+                  request_id:`voice_${call.call_id.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 74)}`})
+              });
+              output = await result.json();
+              if (output.status === 'confirmed') offeredSlots.delete(args.slot_id);
+            }
+          }
+        } catch {
+          output = {status:'error', error_code:call.name === 'create_booking'
+            ? 'booking_unreachable' : 'availability_unreachable'};
+        }
+        if (events.readyState !== 'open') return;
+        showToolResult(call.name, output);
+        events.send(JSON.stringify({
+          type:'conversation.item.create',
+          item:{type:'function_call_output', call_id:call.call_id,
+            output:JSON.stringify(output)}
+        }));
+        status.textContent = call.name === 'create_booking'
+          ? (output.status === 'confirmed'
+            ? `Booking confirmed: ${output.booking_reference}`
+            : `Booking not confirmed: ${output.error_code ?? 'unknown error'}`)
+          : (output.status === 'ok'
+            ? `Availability returned ${output.slots.length} slot(s).`
+            : `Availability failed: ${output.error_code ?? 'unknown error'}` +
+              (output.upstream_http_status ? ` (n8n HTTP ${output.upstream_http_status})` : ''));
+      }
+      if (events.readyState === 'open') {
+        events.send(JSON.stringify({type:'response.create'}));
+      }
+    };
+    const offer = await connection.createOffer();
+    await connection.setLocalDescription(offer);
+    status.textContent = 'Connecting to OpenAI…';
+    const result = await fetch('/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/sdp' },
+      body: offer.sdp,
+    });
+    if (!result.ok) throw new Error(await result.text());
+    await connection.setRemoteDescription({ type: 'answer', sdp: await result.text() });
+    stop.disabled = false;
+  } catch (error) {
+    endCall();
+    status.textContent = `Could not start: ${error.message}`;
+  }
+};
+stop.onclick = endCall;
+</script>
+</html>

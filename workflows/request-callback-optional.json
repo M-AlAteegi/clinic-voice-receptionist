@@ -1,0 +1,369 @@
+{
+  "name": "Clinic Voice — Request Callback",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "clinic/request-callback",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        0
+      ],
+      "id": "0f45fe2b-9f49-4d26-8117-3d7cbab72aa0",
+      "name": "Webhook"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "",
+          "mode": "list",
+          "cachedResultName": "clinic_callbacks"
+        },
+        "returnAll": true
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        160,
+        0
+      ],
+      "id": "51e9b906-0818-4e5f-a280-dea59af2b9fd",
+      "name": "Get All Callbacks",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Code node after Get All Callbacks. Rename it \"Decide Callback\".\n// Mode: Run Once for All Items. Use only synthetic details for this POC.\nconst crypto = require('crypto');\nconst incoming = $('Webhook').first().json;\nlet body = incoming.body ?? incoming;\nif (typeof body === 'string') {\n  try { body = JSON.parse(body); }\n  catch { body = null; }\n}\nconst rows = $input.all().map(item => item.json)\n  .filter(row => row && typeof row === 'object' && row.request_id);\n\nfunction reply(httpStatus, status, errorCode, message, extra = {}) {\n  return [{json:{action:'respond', http_status:httpStatus, status,\n    ...(errorCode ? {error_code:errorCode} : {}), message, ...extra}}];\n}\nfunction field(name) {\n  return typeof body?.[name] === 'string' ? body[name].trim() : '';\n}\n\nconst requestId = field('request_id');\nconst name = field('name');\nconst callbackNumber = field('callback_number');\nconst administrativeReason = field('administrative_reason');\nconst consentTurnId = field('consent_turn_id');\nconst allowedReasons = new Set([\n  'fee_question', 'insurance_question', 'other_service',\n  'cancellation_request', 'rescheduling_request', 'medical_question'\n]);\nif (!/^[A-Za-z0-9_-]{8,80}$/.test(requestId) ||\n    name.length < 2 || name.length > 80 ||\n    !/^[+0-9 -]{7,20}$/.test(callbackNumber) ||\n    !allowedReasons.has(administrativeReason) ||\n    !/^T[1-9]\\d*$/.test(consentTurnId)) {\n  return reply(400, 'invalid_request', 'invalid_callback_fields',\n    'Provide a valid request_id, demo name, callback number, administrative_reason, and consent_turn_id.');\n}\n\nconst sameRequest = rows.filter(row => row.request_id === requestId);\nif (sameRequest.length > 1) {\n  return reply(409, 'error', 'duplicate_request_rows',\n    'Multiple callback rows have the same request_id; staff review is needed.');\n}\nif (sameRequest.length === 1) {\n  const existing = sameRequest[0];\n  if (existing.name === name && existing.callback_number === callbackNumber &&\n      existing.administrative_reason === administrativeReason &&\n      existing.consent_turn_id === consentTurnId &&\n      existing.status === 'saved' && existing.callback_reference) {\n    return reply(200, 'saved', '', 'Existing callback request returned for this request_id.', {\n      callback_reference:existing.callback_reference, reused:true\n    });\n  }\n  return reply(409, 'error', 'request_id_conflict',\n    'This request_id was already used with different callback details.');\n}\n\nconst callbackReference = 'CB-' + crypto.createHash('sha256')\n  .update(requestId).digest('hex').slice(0, 16).toUpperCase();\nif (rows.some(row => row.callback_reference === callbackReference)) {\n  return reply(409, 'error', 'reference_conflict',\n    'Callback reference collision; use a new request_id.');\n}\n\nreturn [{json:{\n  action:'insert', http_status:200,\n  request_id:requestId, callback_reference:callbackReference,\n  name, callback_number:callbackNumber,\n  administrative_reason:administrativeReason,\n  consent_turn_id:consentTurnId,\n  created_at:new Date().toISOString(), status:'saved'\n}}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        336,
+        0
+      ],
+      "id": "20924d1d-4e24-4310-8f3d-30e20c521907",
+      "name": "Decide Callback"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "11d88f2a-e0f1-48b3-87f2-19a70723f82f",
+              "leftValue": "={{ $json.action }}",
+              "rightValue": "insert",
+              "operator": {
+                "type": "string",
+                "operation": "equals",
+                "name": "filter.operator.equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        480,
+        0
+      ],
+      "id": "6fb957fe-3a97-4868-bd1e-804267b8288a",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "options": {
+          "responseCode": "={{ $json.http_status }}"
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        656,
+        112
+      ],
+      "id": "137584aa-c6ec-4360-8282-e392e6876719",
+      "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "dataTableId": {
+          "__rl": true,
+          "value": "",
+          "mode": "list",
+          "cachedResultName": "clinic_callbacks"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "request_id": "={{ $json.request_id }}",
+            "callback_reference": "={{ $json.callback_reference }}",
+            "name": "={{ $json.name }}",
+            "callback_number": "={{ $json.callback_number }}",
+            "administrative_reason": "={{ $json.administrative_reason }}",
+            "consent_turn_id": "={{ $json.consent_turn_id }}",
+            "created_at": "={{ $json.created_at }}",
+            "status": "={{ $json.status }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "request_id",
+              "displayName": "request_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "callback_reference",
+              "displayName": "callback_reference",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "name",
+              "displayName": "name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "callback_number",
+              "displayName": "callback_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "administrative_reason",
+              "displayName": "administrative_reason",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "consent_turn_id",
+              "displayName": "consent_turn_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        656,
+        -96
+      ],
+      "id": "b7e87b22-b467-494a-a317-7990440741a8",
+      "name": "Insert row"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "",
+          "mode": "list",
+          "cachedResultName": "clinic_callbacks"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "request_id",
+              "keyValue": "={{ $('Decide Callback').first().json.request_id }}"
+            }
+          ]
+        },
+        "returnAll": true
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        816,
+        -96
+      ],
+      "id": "b32deb4e-fec1-45c5-8661-8bef24f03312",
+      "name": "Get row(s)",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Code node after Get Saved Callback. Rename it \"Verify Callback\".\n// Mode: Run Once for All Items. A success response requires a stored row.\nconst expected = $('Decide Callback').first().json;\nconst matches = $input.all().map(item => item.json)\n  .filter(row => row && row.request_id === expected.request_id);\nif (matches.length !== 1 || matches[0].status !== 'saved' ||\n    matches[0].callback_reference !== expected.callback_reference ||\n    matches[0].name !== expected.name ||\n    matches[0].callback_number !== expected.callback_number ||\n    matches[0].administrative_reason !== expected.administrative_reason ||\n    matches[0].consent_turn_id !== expected.consent_turn_id) {\n  return [{json:{http_status:500, status:'error',\n    error_code:'callback_not_committed',\n    message:'The callback request could not be verified as saved.'}}];\n}\nreturn [{json:{\n  http_status:200, status:'saved',\n  callback_reference:matches[0].callback_reference, reused:false\n}}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        992,
+        -96
+      ],
+      "id": "bc721de2-ab11-4e47-820a-b3ee4f44669d",
+      "name": "Verify Callback"
+    },
+    {
+      "parameters": {
+        "options": {
+          "responseCode": "={{ $json.http_status }}"
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1152,
+        -96
+      ],
+      "id": "efa28b0e-4c48-47e7-b232-705690ac7bd5",
+      "name": "Respond to Webhook1"
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Get All Callbacks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get All Callbacks": {
+      "main": [
+        [
+          {
+            "node": "Decide Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decide Callback": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [
+          {
+            "node": "Insert row",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert row": {
+      "main": [
+        [
+          {
+            "node": "Get row(s)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get row(s)": {
+      "main": [
+        [
+          {
+            "node": "Verify Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Callback": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  }
+}
